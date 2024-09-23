@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Control Sandbox</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.20.0/matter.min.js"></script>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+
+<style>
+  .input-container {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .input-item {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+  }
+
+  label {
+    margin-right: 10px;
+    width: 70px;
+  }
+
+  input[type="range"] {
+    width: 200px;
+  }
+
+  output {
+    width: 40px;
+    /* Fixed width for output */
+    text-align: left;
+    /* Align output value to the right */
+  }
+</style>
+
+<body>
+  <!-- Reset Button -->
+
+  <div class="input-container">
+    <div id="enabled" class="input-item"></div>
+    <div id="joystick" class="input-item"></div>
+    <div id="error" class="input-item"></div>
+    <div id="control" class="input-item"></div>
+  </div>
+
+  <div id="signals"></div>
+
+  <div id="sim"></div>
+
+  <div><button id="Reset">Reset Sim</button></div>
+
+  <script>
+
+    // Create a slider input inside the div with the given id.
+    // Return a function that returns the current value of the slider.
+    function createSlider(id, name, min, max, init, step, reset_on_release) {
+      const container = document.getElementById(id);
+
+      const slider = document.createElement("input");
+      slider.type = "range";
+      slider.min = min;
+      slider.max = max;
+      slider.value = init;
+      slider.step = step;
+      document.getElementById(id).appendChild(slider);
+
+      const label = document.createElement("label");
+      label.textContent = name;
+      label.className = "input-label";
+      label.for = slider;
+
+      const output = document.createElement("span");
+      output.textContent = init;
+
+      container.appendChild(label);
+      container.appendChild(slider);
+      container.appendChild(output);
+
+      slider.addEventListener("input", function () {
+        output.textContent = slider.value;
+      });
+
+      if (reset_on_release) {
+        slider.addEventListener("mouseup", function () {
+          setTimeout(() => {
+            slider.value = init;
+            output.textContent = init;
+          }, 0);
+        });
+
+        slider.addEventListener("touchend", function () {
+          setTimeout(() => {
+            slider.value = init;
+            output.textContent = init;
+          }, 0);
+        });
+      }
+
+      return function () {
+        return parseFloat(slider.value);
+      }
+    }
+
+    // Create a checkbox input inside the div with the given id.
+    // Return a function that returns whether the checkbox is checked.
+    function createCheckbox(id, name) {
+      const container = document.getElementById(id);
+
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.id = id;
+
+      const label = document.createElement("label");
+      label.textContent = name;
+      label.htmlFor = id;
+
+      container.appendChild(label);
+      container.appendChild(checkbox);
+
+      return function () {
+        return checkbox.checked;
+      }
+    }
+
+    // Create a textbox to input a formula. This should return a function that
+    // is passed a context object containing the relevant variables and returns
+    // the result of the formula.
+    function createFormulaInput(id, name, init) {
+      const container = document.getElementById(id);
+
+      const label = document.createElement("label");
+
+      const input = document.createElement("input");
+      input.value = init;
+
+      label.textContent = name;
+      label.htmlFor = input;
+
+      container.appendChild(label);
+      container.appendChild(input);
+
+      return function evaluateFormula(variablesContext) {
+        const formula = input.value; // Get the input formula
+
+
+        try {
+          // Create a dynamic function using the formula and the context (variables)
+          const evalFunc = new Function(...Object.keys(variablesContext), `return ${formula};`);
+
+          // Evaluate the function with the current variable values
+          result = evalFunc(...Object.values(variablesContext));
+          if (result == undefined) {
+            return 0;
+          } else {
+            return result;
+          }
+        } catch (e) {
+          return 0;
+        }
+      };
+    }
+
+
+    function createChart(divId) {
+      // General setup
+      const margin = { top: 20, right: 20, bottom: 30, left: 50 },
+        width = 800 - margin.left - margin.right,
+        height = 300 - margin.top - margin.bottom;
+      const maxDataPoints = 500; // Global limit for data points
+
+      // Select the div and append the SVG canvas
+      const svg = d3.select(`#${divId}`)
+        .append("svg")
+        .attr("width", width + margin.left + margin.right)
+        .attr("height", height + margin.top + margin.bottom)
+        .append("g")
+        .attr("transform", `translate(${margin.left},${margin.top})`);
+
+      // Setup scales and axes
+      const xScale = d3.scaleLinear().domain([0, maxDataPoints - 1]).range([0, 600]);
+      const yScale = d3.scaleLinear().domain([0, 100]).range([height, 0]); // Y scale for values (0 to 100 as default)
+
+      const xAxis = d3.axisBottom(xScale);
+      const yAxis = d3.axisLeft(yScale);
+
+      svg.append("g")
+        .attr("transform", `translate(0,${height})`)
+        .attr("class", "x-axis")
+        .call(xAxis);
+
+      svg.append("g")
+        .attr("class", "y-axis")
+        .call(yAxis);
+
+
+      // Create an empty object to store lines
+      const lines = {};
+
+      // Legend setup
+      const legend = svg.append("g")
+        .attr("class", "legend")
+        .attr("transform", `translate(${width - 100}, 10)`);
+
+      var categories = [
+      ];
+
+      var max_per_line = { "Default": 10 };
+      var min_per_line = { "Default": 0 };
+
+      function updateRange(name, min, max) {
+        min_per_line[name] = min;
+        max_per_line[name] = max;
+
+        yScale.domain([Math.min(...Object.values(min_per_line)), Math.max(...Object.values(max_per_line))]);
+        svg.selectAll(".y-axis").call(yAxis);
+      }
+
+      function clearRange(name) {
+        delete min_per_line[name];
+        delete max_per_line[name];
+
+        yScale.domain([Math.min(...Object.values(min_per_line)), Math.max(...Object.values(max_per_line))]);
+        svg.selectAll(".y-axis").call(yAxis);
+      }
+
+      function updateLegend(name, color, onClick, initial_hidden) {
+        categories.push({ name: name, color: color, onClick: onClick, initial_hidden: initial_hidden });
+
+        legend.selectAll(".legend-item").remove(); // Clear the legend
+
+        // Add legend items
+        const legendItem = legend.selectAll(".legend-item")
+          .data(categories)
+          .enter()
+          .append("g")
+          .attr("class", "legend-item")
+          .attr("transform", (d, i) => `translate(0, ${i * 20})`) // Space the items
+          .style("opacity", d => d.initial_hidden ? 0.5 : 1);
+
+        // Add rectangles (or circles) as legend keys
+        legendItem.append("rect")
+          .attr("x", 0)
+          .attr("y", 0)
+          .attr("width", 15)
+          .attr("height", 15)
+          .attr("fill", d => d.color); // Set the color for each category
+
+        // Add text labels to the right of the rectangles
+        legendItem.append("text")
+          .attr("x", 20)
+          .attr("y", 12) // Vertically center the text relative to the rectangle
+          .text(d => d.name)
+          .style("font-size", "12px");
+
+
+        legend.selectAll(".legend-item").on("click", function (event, d) {
+          if (d.onClick()) {
+            d3.select(this).style("opacity", 0.5);
+          } else {
+            d3.select(this).style("opacity", 1);
+          }
+        });
+      }
+
+      // Function to add a new line to the chart
+      function addLine(name, color, initial_hidden) {
+        var hidden = initial_hidden;
+
+        const data = Array(maxDataPoints).fill(0); // Initial data array with zeros
+
+        // Line generator
+        const line = d3.line()
+          .x((d, i) => xScale(i))
+          .y(d => yScale(d));
+
+        // Append the line path to the SVG
+        const path = svg.append("path")
+          .datum(data)
+          .attr("fill", "none")
+          .attr("stroke", color)
+          .attr("stroke-width", 2)
+          .attr("class", "line")
+          .attr("d", line);
+
+        if (hidden) {
+          path.style("display", "none");
+        }
+
+
+        function onClick() {
+          line_elem = d3.select(path.node());
+          hidden = !hidden;
+
+          if (hidden) {
+            line_elem.style("display", "none");
+            clearRange(name);
+          } else {
+            line_elem.style("display", "inline");
+            updateRange(name, Math.min(...data), Math.max(...data));
+          }
+
+          return hidden;
+        }
+
+        updateLegend(name, color, onClick, initial_hidden);
+
+        // Update function for this line
+        function update(newValue) {
+          data.push(newValue); // Push new data point
+          if (data.length > maxDataPoints) {
+            data.shift(); // Remove the oldest point if over the limit
+          }
+
+          if (!hidden) {
+            updateRange(name, Math.min(...data), Math.max(...data));
+          }
+
+          // Update the line path with new data
+          path.datum(data)
+            .attr("d", line);
+        }
+
+        function reset() {
+          data.fill(0);
+
+          clearRange(name);
+
+          path.datum(data)
+            .attr("d", line);
+        }
+
+        // Return the update function
+        return {
+          update: update,
+          reset: reset
+        };
+      }
+
+      // Return the object with the addLine method
+      return {
+        addLine: addLine
+      };
+    }
+
+    function createCar(xx, yy, width, height, wheelSize) {
+      max_torque = 0.3;
+
+      var Body = Matter.Body,
+        Bodies = Matter.Bodies,
+        Composite = Matter.Composite,
+        Constraint = Matter.Constraint;
+
+      var group = Body.nextGroup(true),
+        wheelBase = 20,
+        wheelAOffset = -width * 0.5 + wheelBase,
+        wheelBOffset = width * 0.5 - wheelBase,
+        wheelYOffset = 0;
+
+      var car = Composite.create({ label: 'Car' });
+
+      var body = Bodies.rectangle(xx, yy, width, height, {
+        collisionFilter: {
+          group: group
+        },
+        chamfer: {
+          radius: height * 0.5
+        },
+        density: 0.0002,
+        frictionAir: 0.05,
+        render: {
+          fillStyle: '#555555',
+        }
+      });
+
+      var wheelA = Bodies.circle(xx + wheelAOffset, yy + wheelYOffset, wheelSize, {
+        collisionFilter: {
+          group: group
+        },
+        friction: 0.8,
+        render: {
+          fillStyle: '#225522',
+        }
+      });
+
+      var wheelB = Bodies.circle(xx + wheelBOffset, yy + wheelYOffset, wheelSize, {
+        collisionFilter: {
+          group: group
+        },
+        friction: 0.8,
+        render: {
+          fillStyle: '#225522',
+        }
+      });
+
+      var axelA = Constraint.create({
+        bodyB: body,
+        pointB: { x: wheelAOffset, y: wheelYOffset },
+        bodyA: wheelA,
+        stiffness: 1,
+        length: 0
+      });
+
+      var axelB = Constraint.create({
+        bodyB: body,
+        pointB: { x: wheelBOffset, y: wheelYOffset },
+        bodyA: wheelB,
+        stiffness: 1,
+        length: 0
+      });
+
+      Composite.addBody(car, body);
+      Composite.addBody(car, wheelA);
+      Composite.addBody(car, wheelB);
+      Composite.addConstraint(car, axelA);
+      Composite.addConstraint(car, axelB);
+
+      car.reset_left = function (position) {
+        Composite.translate(car, { x: -800, y: 0 });
+      };
+
+      car.reset_right = function (position) {
+        Composite.translate(car, { x: 800, y: 0 });
+      };
+
+      var integral = 0;
+      var lastKI = 0;
+      var lastTargetVel = 0;
+
+      car.control = function (ctrl) {
+        var input_torque = ctrl / 100.0;
+        const torque = Math.max(Math.min(input_torque, max_torque), -max_torque);
+        wheelA.torque = torque;
+      }
+
+      car.real_velocity = function () {
+        return body.velocity.x;
+      }
+
+      car.rear_wheel_velocity = function () {
+        return wheelA.angularVelocity * wheelSize;
+      }
+
+      car.front_wheel_velocity = function () {
+        return wheelB.angularVelocity * wheelSize;
+      }
+
+      car.position = function () {
+        return body.position.x;
+      }
+
+      car.reset = function () {
+        Body.setPosition(body, { x: xx, y: yy });
+        Body.setVelocity(body, { x: 0, y: 0 });
+        Body.setAngularVelocity(body, 0);
+
+        Body.setPosition(wheelA, { x: xx + wheelAOffset, y: yy + wheelYOffset });
+        Body.setVelocity(wheelA, { x: 0, y: 0 });
+        Body.setAngularVelocity(wheelA, 0);
+
+        Body.setPosition(wheelB, { x: xx + wheelBOffset, y: yy + wheelYOffset });
+        Body.setVelocity(wheelB, { x: 0, y: 0 });
+        Body.setAngularVelocity(wheelB, 0);
+      }
+
+      return car;
+    };
+
+    const get_enabled = createCheckbox("enabled", "enabled");
+    const get_joystick = createSlider("joystick", "joystick", -50, 50, 0, 0.1, true);
+    const get_error = createFormulaInput("error", "error", "0");
+    const get_control = createFormulaInput("control", "control", "joystick");
+
+    const chart = createChart("signals");
+
+    const joystick_line = chart.addLine("joystick", "black", false);
+    const position_line = chart.addLine("position", "blue", false);
+    const velocity_line = chart.addLine("velocity", "purple", false);
+    const target_line = chart.addLine("target", "green", true);
+    const error_line = chart.addLine("error", "red", true);
+    const control_line = chart.addLine("control", "pink", true);
+    const ideal_velocity_line = chart.addLine("ideal_velocity", "orange", true);
+
+    function setupSim() {
+      var Engine = Matter.Engine,
+        Render = Matter.Render,
+        Runner = Matter.Runner,
+        Composites = Matter.Composites,
+        Composite = Matter.Composite,
+        Bodies = Matter.Bodies,
+        Events = Matter.Events,
+        Body = Matter.Body;
+
+      // create engine
+      var engine = Engine.create(),
+        world = engine.world;
+
+      // create renderer
+      var render = Render.create({
+        element: document.getElementById('sim'),
+        engine: engine,
+        options: {
+          width: 800,
+          height: 300,
+          showAngleIndicator: true,
+          showCollisions: true,
+          wireframes: false
+        }
+      });
+
+      Render.run(render);
+
+      // create runner
+      var runner = Runner.create();
+      Runner.run(runner, engine);
+
+      // add bodies
+      Composite.add(world,
+        Bodies.rectangle(400, 300, 1000, 50, { isStatic: true })
+      );
+
+      // see car function defined later in this file
+      var car = createCar(150, 100, 150, 30, 30);
+      Composite.add(world, car);
+
+      var target_body = Bodies.rectangle(600, 300, 150, 50, { isStatic: true, render: { fillStyle: "green" } });
+      Composite.add(world, target_body);
+
+      // fit the render viewport to the scene
+      Render.lookAt(render, {
+        min: { x: 0, y: 0 },
+        max: { x: 800, y: 300 }
+      });
+
+      function calc_ideal_velocity(currentVelocity, currentPosition, targetPosition, maxAcceleration, maxVelocity) {
+        // Calculate the distance to the target (can be negative if past the target)
+        const distanceToTarget = targetPosition - currentPosition;
+
+        // If we're moving in the direction of the target...
+        if (Math.sign(currentVelocity) === Math.sign(distanceToTarget)) {
+
+          // Determine if we should be decelerating based on current velocity
+          const requiredDecelerationDistance = (currentVelocity ** 2) / (2 * maxAcceleration);
+
+          if (Math.abs(distanceToTarget) <= requiredDecelerationDistance) {
+            // Deceleration phase: Calculate velocity to decelerate to stop at the target
+            const targetVelocity = Math.sqrt(2 * maxAcceleration * Math.abs(distanceToTarget));
+            return distanceToTarget < 0 ? -targetVelocity : targetVelocity;
+          }
+        }
+
+        // Otherwise we should be accelerating toward the target
+        var maxTargetVelocity = Math.sqrt(2 * Math.abs(distanceToTarget) * maxAcceleration);
+
+        var targetVelocity = Math.min(maxTargetVelocity, maxVelocity);
+
+        return distanceToTarget < 0 ? -targetVelocity : targetVelocity;
+      }
+
+
+      Events.on(engine, 'afterUpdate', function () {
+        // Loop around the screen: if the car reaches the right edge, teleport it to the left
+        if (car.position() > 800) {
+          car.reset_left();
+        }
+        if (car.position() < 0) {
+          car.reset_right();
+        }
+
+        if (!get_enabled()) {
+          return;
+        }
+
+
+        const joystick = get_joystick();
+        const position = car.position() / 10 - 40;
+        const velocity = car.real_velocity() / 10 / .016;
+        const target = target_body.position.x / 10 - 40;
+        const ideal_velocity = calc_ideal_velocity(velocity, position, target, 20, 40);
+        const max = Math.max;
+        const min = Math.min;
+        const deadband = function (x, threshold) {
+          return Math.abs(x) < threshold ? 0 : x;
+        }
+        const clamp = function (x, threshold) {
+          return max(min(x, threshold), -threshold);
+        }
+
+
+        const error = get_error({ joystick, position, target, velocity, ideal_velocity, max, min, deadband, clamp });
+        const control = get_control({ joystick, position, target, error, velocity, ideal_velocity, max, min, deadband, clamp });
+
+        car.control(control);
+
+        joystick_line.update(joystick);
+        target_line.update(target);
+        position_line.update(position);
+        velocity_line.update(velocity);
+        error_line.update(error);
+        control_line.update(control);
+        ideal_velocity_line.update(ideal_velocity);
+      });
+
+      return function () {
+        engine.s
+        car.reset();
+      };
+    }
+
+    var reset = setupSim();
+
+    // Reset button
+    document.getElementById("Reset").addEventListener("click", function () {
+      // Set enabled to false
+      document.getElementById("enabled").children[1].checked = false;
+
+      // reset all the lines
+      joystick_line.reset();
+      position_line.reset();
+      velocity_line.reset();
+      target_line.reset();
+      error_line.reset();
+      control_line.reset();
+      ideal_velocity_line.reset();
+
+      reset();
+    });
+
+
+  </script>
+</body>
+
+</html>
